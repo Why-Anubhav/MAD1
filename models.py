@@ -1,159 +1,92 @@
-from datetime import datetime
-from extensions import db
+"""
+Database models for the Placement Portal.
+Uses SQLite via direct sqlite3 — tables are created programmatically.
+"""
+
+import sqlite3
+import os
+from werkzeug.security import generate_password_hash
+
+DB_PATH = os.path.join(os.path.dirname(__file__), "database.db")
 
 
-class User(db.Model):
-    __tablename__ = "users"
-
-    id = db.Column(db.Integer, primary_key=True)
-    username = db.Column(db.String(80), unique=True, nullable=False, index=True)
-    password = db.Column(db.String(255), nullable=False)
-    role = db.Column(db.String(20), nullable=False)  # admin / doctor / patient
-    email = db.Column(db.String(120), unique=True, nullable=False)
-    phone = db.Column(db.String(20), nullable=True)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    is_active = db.Column(db.Boolean, default=True)
-
-    doctor_profile = db.relationship("Doctor", back_populates="user", uselist=False, cascade="all, delete-orphan")
-    patient_profile = db.relationship("Patient", back_populates="user", uselist=False, cascade="all, delete-orphan")
-
-    def to_dict(self):
-        return {
-            "id": self.id,
-            "username": self.username,
-            "role": self.role,
-            "email": self.email,
-            "phone": self.phone,
-            "created_at": self.created_at.isoformat() if self.created_at else None,
-            "is_active": self.is_active,
-        }
+def get_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
 
 
-class Department(db.Model):
-    __tablename__ = "departments"
+def init_db():
+    conn = get_db()
+    c = conn.cursor()
 
-    id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(100), unique=True, nullable=False)
-    description = db.Column(db.Text, nullable=True)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id       INTEGER PRIMARY KEY AUTOINCREMENT,
+            name     TEXT    NOT NULL,
+            email    TEXT    NOT NULL UNIQUE,
+            password TEXT    NOT NULL,
+            role     TEXT    NOT NULL CHECK(role IN ('admin','student','company'))
+        )
+    """)
 
-    doctors = db.relationship("Doctor", back_populates="department")
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS students (
+            student_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            branch          TEXT,
+            cgpa            REAL,
+            graduation_year INTEGER,
+            resume_path     TEXT
+        )
+    """)
 
-    def to_dict(self):
-        return {
-            "id": self.id,
-            "name": self.name,
-            "description": self.description,
-        }
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS companies (
+            company_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            company_name    TEXT    NOT NULL,
+            hr_contact      TEXT,
+            website         TEXT,
+            approval_status TEXT    NOT NULL DEFAULT 'pending'
+                            CHECK(approval_status IN ('pending','approved','rejected'))
+        )
+    """)
 
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS placement_drives (
+            drive_id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_id           INTEGER NOT NULL REFERENCES companies(company_id) ON DELETE CASCADE,
+            job_title            TEXT    NOT NULL,
+            job_description      TEXT,
+            eligibility          TEXT,
+            package              TEXT,
+            application_deadline TEXT,
+            drive_status         TEXT    NOT NULL DEFAULT 'pending'
+                                 CHECK(drive_status IN ('pending','approved','rejected'))
+        )
+    """)
 
-class Doctor(db.Model):
-    __tablename__ = "doctors"
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS applications (
+            application_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+            student_id         INTEGER NOT NULL REFERENCES students(student_id) ON DELETE CASCADE,
+            drive_id           INTEGER NOT NULL REFERENCES placement_drives(drive_id) ON DELETE CASCADE,
+            application_date   TEXT    NOT NULL,
+            application_status TEXT    NOT NULL DEFAULT 'Applied'
+                               CHECK(application_status IN ('Applied','Shortlisted','Selected','Rejected')),
+            UNIQUE(student_id, drive_id)
+        )
+    """)
 
-    id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
-    specialization = db.Column(db.String(150), nullable=False)
-    availability = db.Column(db.JSON, nullable=True, default=dict)  # {date: [time_slots]}
-    department_id = db.Column(db.Integer, db.ForeignKey("departments.id"), nullable=True)
+    existing = c.execute("SELECT id FROM users WHERE role='admin'").fetchone()
+    if not existing:
+        c.execute(
+            "INSERT INTO users (name, email, password, role) VALUES (?,?,?,?)",
+            ("Admin", "admin@portal.com", generate_password_hash("admin123"), "admin"),
+        )
 
-    user = db.relationship("User", back_populates="doctor_profile")
-    department = db.relationship("Department", back_populates="doctors")
-    appointments = db.relationship("Appointment", back_populates="doctor")
-
-    def to_dict(self):
-        return {
-            "id": self.id,
-            "user_id": self.user_id,
-            "username": self.user.username if self.user else None,
-            "email": self.user.email if self.user else None,
-            "phone": self.user.phone if self.user else None,
-            "is_active": self.user.is_active if self.user else True,
-            "specialization": self.specialization,
-            "availability": self.availability or {},
-            "department_id": self.department_id,
-            "department": self.department.name if self.department else None,
-        }
-
-
-class Patient(db.Model):
-    __tablename__ = "patients"
-
-    id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
-    age = db.Column(db.Integer, nullable=True)
-    gender = db.Column(db.String(20), nullable=True)
-    address = db.Column(db.Text, nullable=True)
-
-    user = db.relationship("User", back_populates="patient_profile")
-    appointments = db.relationship("Appointment", back_populates="patient")
-
-    def to_dict(self):
-        return {
-            "id": self.id,
-            "user_id": self.user_id,
-            "username": self.user.username if self.user else None,
-            "email": self.user.email if self.user else None,
-            "phone": self.user.phone if self.user else None,
-            "is_active": self.user.is_active if self.user else True,
-            "age": self.age,
-            "gender": self.gender,
-            "address": self.address,
-        }
-
-
-class Appointment(db.Model):
-    __tablename__ = "appointments"
-
-    id = db.Column(db.Integer, primary_key=True)
-    patient_id = db.Column(db.Integer, db.ForeignKey("patients.id"), nullable=False)
-    doctor_id = db.Column(db.Integer, db.ForeignKey("doctors.id"), nullable=False)
-    date = db.Column(db.String(20), nullable=False)   # YYYY-MM-DD
-    time = db.Column(db.String(10), nullable=False)   # HH:MM
-    status = db.Column(db.String(20), default="booked")  # booked / completed / cancelled
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-
-    patient = db.relationship("Patient", back_populates="appointments")
-    doctor = db.relationship("Doctor", back_populates="appointments")
-    treatment = db.relationship("Treatment", back_populates="appointment", uselist=False, cascade="all, delete-orphan")
-
-    def to_dict(self):
-        return {
-            "id": self.id,
-            "patient_id": self.patient_id,
-            "doctor_id": self.doctor_id,
-            "patient_name": self.patient.user.username if self.patient and self.patient.user else None,
-            "doctor_name": self.doctor.user.username if self.doctor and self.doctor.user else None,
-            "doctor_specialization": self.doctor.specialization if self.doctor else None,
-            "department": self.doctor.department.name if self.doctor and self.doctor.department else None,
-            "date": self.date,
-            "time": self.time,
-            "status": self.status,
-            "created_at": self.created_at.isoformat() if self.created_at else None,
-        }
-
-
-class Treatment(db.Model):
-    __tablename__ = "treatments"
-
-    id = db.Column(db.Integer, primary_key=True)
-    appointment_id = db.Column(db.Integer, db.ForeignKey("appointments.id"), nullable=False)
-    diagnosis = db.Column(db.Text, nullable=True)
-    prescription = db.Column(db.Text, nullable=True)
-    notes = db.Column(db.Text, nullable=True)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-
-    appointment = db.relationship("Appointment", back_populates="treatment")
-
-    def to_dict(self):
-        appt = self.appointment
-        return {
-            "id": self.id,
-            "appointment_id": self.appointment_id,
-            "patient_name": appt.patient.user.username if appt and appt.patient and appt.patient.user else None,
-            "doctor_name": appt.doctor.user.username if appt and appt.doctor and appt.doctor.user else None,
-            "date": appt.date if appt else None,
-            "time": appt.time if appt else None,
-            "diagnosis": self.diagnosis,
-            "prescription": self.prescription,
-            "notes": self.notes,
-            "created_at": self.created_at.isoformat() if self.created_at else None,
-        }
+    conn.commit()
+    conn.close()
+    print("Database initialised.")
